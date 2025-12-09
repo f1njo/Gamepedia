@@ -1,0 +1,675 @@
+import os
+import json
+import hashlib
+import tkinter as tk
+from tkinter import messagebox
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from PIL import Image, ImageDraw, ImageTk
+from db import (
+    get_connection,
+    fetch_all_games,
+    fetch_user_by_username,
+    create_user,
+    delete_duplicate_games_by_title,
+)
+
+USERS_FILE = "users.json"
+PROPOSALS_FILE = "proposals.txt"
+GAME_FIELDS = [
+    ("Название", "название"),
+    ("Год", "год"),
+    ("Жанр", "жанр"),
+    ("Разработчик", "разработчик"),
+    ("Платформы", "платформы"),
+    ("Рейтинг", "рейтинг"),
+    ("Описание", "описание"),
+]
+
+def load_games(_filename=None):
+    rows = fetch_all_games()
+    games = []
+    for row in rows:
+        g = {
+            "название": row["title"] or "",
+            "год": str(row["release_year"]) if row["release_year"] is not None else "",
+            "жанр": row["genre"] or "",
+            "разработчик": row["developer"] or "",
+            "платформы": row["platforms"] or "",
+            "рейтинг": f"{row['rating']} / 10" if row["rating"] is not None else "",
+            "описание": row["description"] or "",
+        }
+        games.append(g)
+    return games
+
+def save_games_to_file(current_games):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("TRUNCATE TABLE games")
+
+    insert_sql = """
+        INSERT INTO games
+        (title, release_year, genre, developer, platforms, rating, description, image_path)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    for g in current_games:
+        title = g.get("название", "").strip()
+        year_str = g.get("год", "").strip()
+        release_year = int(year_str) if year_str.isdigit() else None
+        genre = g.get("жанр", "").strip() or None
+        developer = g.get("разработчик", "").strip() or None
+        platforms = g.get("платформы", "").strip() or None
+        rating_raw = g.get("рейтинг", "").strip()
+        rating = None
+        if rating_raw:
+            try:
+                rating_str = rating_raw.split("/")[0].strip().replace(",", ".")
+                rating = float(rating_str)
+            except Exception:
+                rating = None
+
+        description = g.get("описание", "").strip() or None
+        image_path = f"banners/{title}.jpg" if title else None
+
+        cursor.execute(
+            insert_sql,
+            (title, release_year, genre, developer, platforms, rating, description, image_path)
+        )
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+def load_users():
+    return {}
+
+def save_users(_data):
+    pass
+
+def ensure_default_admin():
+    import hashlib
+    user = fetch_user_by_username("admin")
+    if not user:
+        pwd_hash = hashlib.sha256("admin123".encode("utf-8")).hexdigest()
+        create_user("admin", pwd_hash, "admin")
+
+def register_user(username, password, role="user"):
+    import hashlib
+    pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    create_user(username, pwd_hash, role)
+
+def authenticate_user(username, password):
+    import hashlib
+    user = fetch_user_by_username(username)
+    if not user:
+        return None
+
+    pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+    if user.get("password_hash") == pwd_hash:
+        return {"role": user.get("role", "user")}
+    return None
+
+def toggle_theme():
+    global current_theme
+    current_theme = "flatly" if current_theme == "darkly" else "darkly"
+    root.style.theme_use(current_theme)
+    theme_btn.config(text="☀" if current_theme == "darkly" else "🌙")
+
+def open_drawing_pad():
+    win = tk.Toplevel(root)
+    win.title("Заметка")
+    win.geometry("400x400")
+    win.resizable(False, False)
+
+    canvas = tk.Canvas(win, bg="white", width=400, height=350)
+    canvas.pack()
+
+    img = Image.new("RGB", (400, 350), "white")
+    draw = ImageDraw.Draw(img)
+    last = [None, None]
+
+    def press(event):
+        last[0], last[1] = event.x, event.y
+
+    def move(event):
+        x, y = event.x, event.y
+        if last[0] is not None:
+            canvas.create_line(last[0], last[1], x, y, width=2)
+            draw.line((last[0], last[1], x, y), fill="black", width=2)
+        last[0], last[1] = x, y
+
+    def release(event):
+        last[0], last[1] = None, None
+
+    canvas.bind("<Button-1>", press)
+    canvas.bind("<B1-Motion>", move)
+    canvas.bind("<ButtonRelease-1>", release)
+
+    def save():
+        if not os.path.exists("notes"):
+            os.mkdir("notes")
+        i = 1
+        while os.path.exists(f"notes/note_{i}.png"):
+            i += 1
+        img.save(f"notes/note_{i}.png")
+        messagebox.showinfo("Сохранено", f"Заметка сохранена: note_{i}.png")
+        win.destroy()
+
+    ttk.Button(win, text="Сохранить", command=save).pack(pady=5)
+
+games = load_games("games.txt")
+filtered_games = []
+users = load_users()
+ensure_default_admin()
+current_user = None
+auth_window = None
+current_theme = "darkly"
+base_title = "Gamepedia"
+
+root = ttk.Window(themename=current_theme)
+root.iconbitmap("icon.ico")
+root.title(base_title)
+root.geometry("1280x720")
+root.resizable(False, False)
+
+top = ttk.Frame(root, padding=5)
+top.pack(side=tk.TOP, fill=tk.X)
+
+search_var = tk.StringVar()
+letter_var = tk.StringVar(value="A - Z")
+rating_var = tk.StringVar(value="Рейтинг")
+year_var = tk.StringVar(value="Год")
+genre_var = tk.StringVar(value="Жанр")
+platform_var = tk.StringVar(value="Платформа")
+
+def on_entry_click(event):
+    if search_var.get() == "Поиск...":
+        search_entry.delete(0, tk.END)
+        search_entry.config(foreground="white")
+
+def on_focusout(event):
+    if not search_entry.get():
+        search_entry.insert(0, "Поиск...")
+        search_entry.config(foreground="gray")
+
+search_var = tk.StringVar()
+search_entry = ttk.Entry(top, textvariable=search_var, width=30)
+search_entry.insert(0, "Поиск...")
+search_entry.config(foreground="gray")
+search_entry.bind("<FocusIn>", on_entry_click)
+search_entry.bind("<FocusOut>", on_focusout)
+search_entry.pack(side=tk.LEFT, padx=(5, 10))
+
+letter_box = ttk.Combobox(top, textvariable=letter_var, width=5, state="readonly")
+letter_box["values"] = ["A - Z"] + [chr(i) for i in range(ord('A'), ord('Z')+1)]
+letter_box.pack(side=tk.LEFT, padx=(5, 10))
+
+actions_frame = ttk.Frame(top)
+actions_frame.pack(side=tk.RIGHT, padx=(5, 0))
+
+add_btn = ttk.Button(actions_frame, text="Требуется вход", width=18)
+add_btn.config(state=tk.DISABLED)
+add_btn.pack(side=tk.LEFT)
+
+logout_btn = ttk.Button(actions_frame, text="Выйти", width=7)
+logout_btn.config(state=tk.DISABLED)
+logout_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+theme_btn = ttk.Button(top, text="🌙", width=3, command=toggle_theme)
+theme_btn.pack(side=tk.RIGHT, padx=(5, 10))
+
+note_btn = ttk.Button(top, text="🖊️", width=3, command=open_drawing_pad)
+note_btn.pack(side=tk.RIGHT, padx=(5, 5))
+
+platform_box = ttk.Combobox(top, textvariable=platform_var, width=11, state="readonly")
+platform_box.pack(side=tk.RIGHT, padx=(10, 5))
+
+year_box = ttk.Combobox(top, textvariable=year_var, width=5, state="readonly")
+year_box.pack(side=tk.RIGHT, padx=(0, 0))
+
+genre_box = ttk.Combobox(top, textvariable=genre_var, width=18, state="readonly")
+genre_box.pack(side=tk.RIGHT, padx=(0, 10))
+
+rating_box = ttk.Combobox(top, textvariable=rating_var, width=13, state="readonly")
+rating_box["values"] = ["Рейтинг", "Сначала высокий", "Сначала низкий"]
+rating_box.pack(side=tk.RIGHT, padx=(10, 10))
+
+paned = ttk.Panedwindow(root, orient=HORIZONTAL)
+paned.pack(fill=BOTH, expand=True)
+
+left = ttk.Frame(paned, padding=10)
+paned.add(left, weight=1)
+
+game_list = tk.Listbox(left, font=("Segoe UI", 11))
+game_list.pack(fill=BOTH, expand=True)
+
+right = ttk.Frame(paned, padding=10)
+banner_label = ttk.Label(right)
+banner_label.pack(pady=(0, 10))
+info = ttk.Text(right, wrap="word", font=("Segoe UI", 12), state="disabled")
+info.pack(fill=BOTH, expand=True)
+paned.add(right, weight=3)
+
+def parse_rating(g):
+    raw = g.get("рейтинг", "")
+    try:
+        rating_str = raw.split("/")[0].strip().replace(",", ".")
+        return float(rating_str)
+    except Exception:
+        return 0.0
+
+def update_list(*_):
+    global filtered_games
+    filtered_games = []
+
+    query = search_var.get().lower()
+    if query == "поиск...":
+        query = ""
+    letter = letter_var.get()
+    gnr = genre_var.get()
+    rating_sort = rating_var.get()
+    plat = platform_var.get()
+    year = year_var.get()
+    game_list.delete(0, tk.END)
+
+    for g in games:
+        title = g.get("название", "").lower()
+        genre = g.get("жанр", "")
+        plats = g.get("платформы", "")
+
+        if query and query not in title:
+            continue
+        if year != "Год" and g.get("год", "") != year:
+            continue
+        if gnr != "Жанр":
+            genre_list = [g_.strip().lower() for g_ in genre.split("/")]
+            if gnr.lower() not in genre_list:
+                continue
+        if plat != "Платформа":
+            plat_list = [p.strip().lower() for p in plats.split(",")]
+            if plat.lower() not in plat_list:
+                continue
+        if letter != "A - Z":
+            if not g.get("название", "").upper().startswith(letter.upper()):
+                continue
+
+        filtered_games.append(g)
+
+    if rating_sort == "Сначала высокий":
+        filtered_games.sort(key=parse_rating, reverse=True)
+    elif rating_sort == "Сначала низкий":
+        filtered_games.sort(key=parse_rating)
+    else:
+        filtered_games.sort(key=lambda g: g.get("название", "").lower())
+
+    for g in filtered_games:
+        game_list.insert(tk.END, g.get("название", "Без названия"))
+
+def show_info(_):
+    idxs = game_list.curselection()
+    if not idxs:
+        return
+    idx = idxs[0]
+    if idx >= len(filtered_games):
+        return
+    g = filtered_games[idx]
+    txt = f"""Название: {g.get('название', '')}
+Год: {g.get('год', '')}
+Жанр: {g.get('жанр', '')}
+Разработчик: {g.get('разработчик', '')}
+Платформы: {g.get('платформы', '')}
+Рейтинг: {g.get('рейтинг', '')}
+
+Описание:
+{g.get('описание', '')}"""
+    info.config(state="normal")
+    info.delete("1.0", "end")
+    info.insert("end", txt)
+    info.config(state="disabled")
+
+    banner_path = f"banners/{g.get('название')}.jpg"
+    if os.path.exists(banner_path):
+        img = Image.open(banner_path).resize((350, 200))
+        banner = ImageTk.PhotoImage(img)
+        banner_label.config(image=banner)
+        banner_label.image = banner
+    else:
+        banner_label.config(image='', text="(Баннер не найден)")
+
+def update_user_state():
+    if current_user:
+        role = current_user.get("role", "user")
+        readable_role = "Админ" if role == "admin" else "Пользователь"
+        root.title(f"{base_title} - {current_user['username']} ({readable_role})")
+        logout_btn.config(state=tk.NORMAL)
+        if role == "admin":
+            add_btn.config(text="Админ-панель", state=tk.NORMAL)
+        else:
+            add_btn.config(text="Предложить игру", state=tk.NORMAL)
+    else:
+        root.title(base_title)
+        logout_btn.config(state=tk.DISABLED)
+        add_btn.config(text="Требуется вход", state=tk.DISABLED)
+
+def handle_primary_action():
+    if not current_user:
+        messagebox.showwarning("Требуется вход", "Авторизуйтесь, чтобы продолжить.")
+        return
+    if current_user.get("role") == "admin":
+        open_admin_panel()
+    else:
+        open_propose_game()
+
+def logout():
+    global current_user
+    current_user = None
+    update_user_state()
+    root.after(0, open_login_window)
+
+def open_registration_window(parent):
+    reg_win = tk.Toplevel(parent)
+    reg_win.title("Регистрация")
+    reg_win.geometry("320x220")
+    reg_win.resizable(False, False)
+    reg_win.grab_set()
+
+    user_var = tk.StringVar()
+    pass_var = tk.StringVar()
+    confirm_var = tk.StringVar()
+
+    ttk.Label(reg_win, text="Логин").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+    user_entry = ttk.Entry(reg_win, textvariable=user_var)
+    user_entry.grid(row=0, column=1, padx=10, pady=5)
+
+    ttk.Label(reg_win, text="Пароль").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+    pass_entry = ttk.Entry(reg_win, textvariable=pass_var, show="*")
+    pass_entry.grid(row=1, column=1, padx=10, pady=5)
+
+    ttk.Label(reg_win, text="Повторите пароль").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+    confirm_entry = ttk.Entry(reg_win, textvariable=confirm_var, show="*")
+    confirm_entry.grid(row=2, column=1, padx=10, pady=5)
+
+    def submit():
+        username = user_var.get().strip()
+        password = pass_var.get().strip()
+        confirm = confirm_var.get().strip()
+
+        if not username or not password:
+            messagebox.showerror("Ошибка", "Логин и пароль не могут быть пустыми.")
+            return
+
+        if password != confirm:
+            messagebox.showerror("Ошибка", "Пароли не совпадают.")
+            return
+
+        existing = fetch_user_by_username(username)
+        if existing:
+            messagebox.showerror("Ошибка", "Пользователь с таким именем уже существует.")
+            return
+
+        register_user(username, password)
+        messagebox.showinfo("Успех", "Регистрация прошла успешно. Теперь можно войти.")
+        reg_win.grab_release()
+        reg_win.destroy()
+
+
+    ttk.Button(reg_win, text="Зарегистрироваться", command=submit).grid(row=3, column=0, columnspan=2, pady=15)
+    user_entry.focus_set()
+
+def open_login_window():
+    global auth_window, current_user
+    if auth_window and auth_window.winfo_exists():
+        return
+
+    root.withdraw()
+    login_win = tk.Toplevel(root)
+    auth_window = login_win
+    login_win.title("Вход в Gamepedia")
+    login_win.geometry("320x220")
+    login_win.resizable(False, False)
+    login_win.grab_set()
+
+    user_var = tk.StringVar()
+    pass_var = tk.StringVar()
+
+    ttk.Label(login_win, text="Логин").pack(pady=(15, 5))
+    user_entry = ttk.Entry(login_win, textvariable=user_var)
+    user_entry.pack(padx=20, fill=tk.X)
+
+    ttk.Label(login_win, text="Пароль").pack(pady=(10, 5))
+    pass_entry = ttk.Entry(login_win, textvariable=pass_var, show="*")
+    pass_entry.pack(padx=20, fill=tk.X)
+
+    def attempt_login():
+        global current_user, auth_window
+        username = user_var.get().strip()
+        password = pass_var.get().strip()
+        if not username or not password:
+            messagebox.showerror("Ошибка", "Введите логин и пароль.")
+            return
+        data = authenticate_user(username, password)
+        if not data:
+            messagebox.showerror("Ошибка", "Неверный логин или пароль.")
+            return
+        current_user = {"username": username, "role": data.get("role", "user")}
+        login_win.grab_release()
+        login_win.destroy()
+        auth_window = None
+        update_user_state()
+        root.deiconify()
+        messagebox.showinfo("Добро пожаловать", f"Вы вошли как {username}.")
+
+    def close_app():
+        global auth_window
+        login_win.grab_release()
+        login_win.destroy()
+        auth_window = None
+        root.destroy()
+
+    ttk.Button(login_win, text="Войти", command=attempt_login).pack(pady=(15, 5))
+    ttk.Button(login_win, text="Регистрация", command=lambda: open_registration_window(login_win)).pack(pady=(0, 10))
+    login_win.bind("<Return>", lambda event: attempt_login())
+    login_win.protocol("WM_DELETE_WINDOW", close_app)
+    user_entry.focus_set()
+
+def open_game_form(title, on_submit, initial=None, submit_text="Сохранить"):
+    form = tk.Toplevel(root)
+    form.title(title)
+    form.geometry("420x480")
+    form.resizable(False, False)
+    form.grab_set()
+    form.grid_columnconfigure(1, weight=1)
+
+    widgets = {}
+    row = 0
+    for label, key in GAME_FIELDS:
+        ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        if label == "Описание":
+            widget = tk.Text(form, width=35, height=6, wrap="word")
+            widget.grid(row=row, column=1, padx=10, pady=5)
+            if initial:
+                widget.insert("1.0", initial.get(key, ""))
+        else:
+            widget = ttk.Entry(form, width=35)
+            widget.grid(row=row, column=1, padx=10, pady=5, sticky="we")
+            if initial:
+                widget.insert(0, initial.get(key, ""))
+        widgets[key] = widget
+        row += 1
+
+    def submit():
+        data = {}
+        for label, key in GAME_FIELDS:
+            widget = widgets[key]
+            if label == "Описание":
+                value = widget.get("1.0", tk.END).strip()
+            else:
+                value = widget.get().strip()
+            data[key] = value
+        if on_submit:
+            result = on_submit(data)
+            if result is not False:
+                form.grab_release()
+                form.destroy()
+
+    ttk.Button(form, text=submit_text, command=submit).grid(row=row, column=0, columnspan=2, pady=15)
+    return form
+
+def open_propose_game():
+    if not current_user:
+        messagebox.showwarning("Требуется вход", "Авторизуйтесь, чтобы предложить игру.")
+        return
+
+    def on_submit(data):
+        block = []
+        for label, key in GAME_FIELDS:
+            block.append(f"{label}: {data.get(key, '')}")
+        block.append(f"Предложено пользователем: {current_user['username']}")
+        block.append("")
+        with open(PROPOSALS_FILE, "a", encoding="utf-8") as f:
+            f.write("\n".join(block))
+        messagebox.showinfo("Спасибо", "Предложение отправлено администратору.")
+        return True
+
+    open_game_form("Предложить игру", on_submit=on_submit, submit_text="Отправить")
+
+def open_admin_panel():
+    if not current_user or current_user.get("role") != "admin":
+        messagebox.showerror("Отказано", "Доступно только администраторам.")
+        return
+
+    panel = tk.Toplevel(root)
+    panel.title("Админ-панель")
+    panel.geometry("700x420")
+    panel.resizable(False, False)
+
+    list_frame = ttk.Frame(panel, padding=10)
+    list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    listbox = tk.Listbox(list_frame, font=("Segoe UI", 11))
+    listbox.pack(fill=tk.BOTH, expand=True)
+
+    btn_frame = ttk.Frame(panel, padding=10)
+    btn_frame.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def refresh_list():
+        listbox.delete(0, tk.END)
+        for g in games:
+            listbox.insert(tk.END, g.get("название", "Без названия"))
+
+    def get_selected_index():
+        selection = listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Выбор", "Сначала выберите игру в списке.")
+            return None
+        return selection[0]
+
+    def add_game_action():
+        def on_submit(data):
+            games.append(data)
+            save_games_to_file(games)
+            update_list()
+            refresh_list()
+            messagebox.showinfo("Сохранено", "Игра успешно добавлена.")
+            return True
+        open_game_form("Добавить игру", on_submit=on_submit)
+
+    def edit_game_action():
+        idx = get_selected_index()
+        if idx is None:
+            return
+        original = games[idx]
+        def on_submit(data, position=idx):
+            games[position] = data
+            save_games_to_file(games)
+            update_list()
+            refresh_list()
+            messagebox.showinfo("Сохранено", "Информация об игре обновлена.")
+            return True
+        open_game_form("Редактировать игру", on_submit=on_submit, initial=original)
+
+    def delete_game_action():
+        idx = get_selected_index()
+        if idx is None:
+            return
+        title = games[idx].get("название", "игру")
+        if messagebox.askyesno("Удаление", f"Удалить {title}?"):
+            games.pop(idx)
+            save_games_to_file(games)
+            update_list()
+            refresh_list()
+            messagebox.showinfo("Готово", "Игра удалена.")
+
+    def remove_duplicates_action():
+        global games
+        deleted = delete_duplicate_games_by_title()
+        if deleted > 0:
+            games = load_games()
+            update_list()
+            refresh_list()
+            messagebox.showinfo("Дубликаты", f"Удалено {deleted} повторяющихся записей.")
+        else:
+            messagebox.showinfo("Дубликаты", "Повторяющихся записей не найдено.")
+
+    def view_proposals():
+        if not os.path.exists(PROPOSALS_FILE):
+            messagebox.showinfo("Предложения", "Файл предложений пока пуст.")
+            return
+        with open(PROPOSALS_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        win = tk.Toplevel(panel)
+        win.title("Предложенные игры")
+        win.geometry("520x420")
+        win.resizable(False, False)
+        txt = tk.Text(win, wrap="word")
+        txt.pack(fill=tk.BOTH, expand=True)
+        if content:
+            txt.insert("1.0", content)
+        else:
+            txt.insert("1.0", "Пока нет предложенных игр.")
+        txt.config(state="disabled")
+
+    ttk.Button(btn_frame, text="Добавить", command=add_game_action).pack(fill=tk.X, pady=5)
+    ttk.Button(btn_frame, text="Редактировать", command=edit_game_action).pack(fill=tk.X, pady=5)
+    ttk.Button(btn_frame, text="Удалить", command=delete_game_action).pack(fill=tk.X, pady=5)
+    ttk.Button(btn_frame, text="Удалить дубликаты", command=remove_duplicates_action).pack(fill=tk.X, pady=5)
+    ttk.Button(btn_frame, text="Предложения", command=view_proposals).pack(fill=tk.X, pady=5)
+
+    refresh_list()
+
+
+search_var.trace_add("write", update_list)
+letter_var.trace_add("write", update_list)
+rating_var.trace_add("write", update_list)
+year_var.trace_add("write", update_list)
+genre_var.trace_add("write", update_list)
+platform_var.trace_add("write", update_list)
+game_list.bind("<<ListboxSelect>>", show_info)
+
+genres = sorted(set(
+    genre.strip()
+    for game in games
+    for genre in game.get("жанр", "").split("/")
+    if genre.strip()
+))
+platforms = sorted(set(p for g in games for p in g.get("платформы", "").split(", ")))
+
+genre_box["values"] = ["Жанр"] + genres
+platform_box["values"] = ["Платформа"] + platforms
+
+years = sorted(set(g.get("год", "") for g in games if g.get("год", "").isdigit()), reverse=True)
+year_box["values"] = ["Год"] + years
+
+add_btn.config(command=handle_primary_action)
+logout_btn.config(command=logout)
+
+update_user_state()
+update_list()
+open_login_window()
+root.mainloop()
