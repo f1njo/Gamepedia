@@ -7,7 +7,7 @@ def get_connection():
     conn = mysql.connector.connect(
         host="localhost",
         user="root",
-        password="your_pass",
+        password="ALBLAK52",
         database="gamepedia"
     )
     return conn
@@ -56,10 +56,6 @@ def create_user(username: str, password_hash: str, role: str = "user"):
 
 
 def delete_duplicate_games_by_title() -> int:
-    """
-    Removes duplicated rows keeping the record with the smallest id for every title.
-    Returns number of rows removed to show feedback in the UI.
-    """
     conn = get_connection()
     cursor = conn.cursor()
     delete_sql = """
@@ -75,3 +71,114 @@ def delete_duplicate_games_by_title() -> int:
     cursor.close()
     conn.close()
     return deleted
+
+def create_proposal(username: str, data: dict):
+    title = (data.get("название") or "").strip()
+    year_str = (data.get("год") or "").strip()
+    release_year = int(year_str) if year_str.isdigit() else None
+    genre = (data.get("жанр") or "").strip() or None
+    developer = (data.get("разработчик") or "").strip() or None
+    platforms = (data.get("платформы") or "").strip() or None
+    rating_raw = (data.get("рейтинг") or "").strip()
+    rating = None
+    if rating_raw:
+        try:
+            rating_str = rating_raw.split("/")[0].strip().replace(",", ".")
+            rating = float(rating_str)
+        except Exception:
+            rating = None
+
+    description = (data.get("описание") or "").strip() or None
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO proposals
+        (username, title, release_year, genre, developer, platforms, rating, description)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (username, title, release_year, genre, developer, platforms, rating, description),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def delete_proposal(proposal_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM proposals WHERE id = %s", (proposal_id,))
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+def fetch_all_proposals():
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT id, username, title, release_year, genre, developer,
+               platforms, rating, description, created_at
+        FROM proposals
+        ORDER BY created_at DESC
+        """
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+def add_favorite(user_id: int, game_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT IGNORE INTO favorites (user_id, game_id) VALUES (%s, %s)",
+        (user_id, game_id),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def remove_favorite(user_id: int, game_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM favorites WHERE user_id = %s AND game_id = %s",
+        (user_id, game_id),
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def is_favorite(user_id: int, game_id: int) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT 1 FROM favorites WHERE user_id = %s AND game_id = %s LIMIT 1",
+        (user_id, game_id),
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return row is not None
+
+
+def fetch_user_favorite_games(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT g.*
+        FROM favorites f
+        JOIN games g ON f.game_id = g.id
+        WHERE f.user_id = %s
+        ORDER BY f.created_at DESC
+        """,
+        (user_id,),
+    )
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows

@@ -12,6 +12,10 @@ from db import (
     fetch_user_by_username,
     create_user,
     delete_duplicate_games_by_title,
+    add_favorite,
+    remove_favorite,
+    is_favorite,
+    fetch_user_favorite_games,
 )
 
 USERS_FILE = "users.json"
@@ -31,6 +35,7 @@ def load_games(_filename=None):
     games = []
     for row in rows:
         g = {
+            "id": row["id"],
             "название": row["title"] or "",
             "год": str(row["release_year"]) if row["release_year"] is not None else "",
             "жанр": row["genre"] or "",
@@ -112,7 +117,11 @@ def authenticate_user(username, password):
     pwd_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
 
     if user.get("password_hash") == pwd_hash:
-        return {"role": user.get("role", "user")}
+        return {
+            "id": user.get("id"),
+            "username": user.get("username"),
+            "role": user.get("role", "user"),
+        }
     return None
 
 def toggle_theme():
@@ -221,6 +230,17 @@ logout_btn = ttk.Button(actions_frame, text="Выйти", width=7)
 logout_btn.config(state=tk.DISABLED)
 logout_btn.pack(side=tk.LEFT, padx=(10, 0))
 
+top_buttons_frame = ttk.Frame(top)
+top_buttons_frame.pack(side=tk.RIGHT, padx=(5, 5))
+
+favorites_list_btn = ttk.Button(
+    top_buttons_frame,
+    text="Мои избранные",
+    width=16,
+    state=tk.DISABLED,
+)
+favorites_list_btn.pack(side=tk.LEFT)
+
 theme_btn = ttk.Button(top, text="🌙", width=3, command=toggle_theme)
 theme_btn.pack(side=tk.RIGHT, padx=(5, 10))
 
@@ -248,6 +268,16 @@ paned.add(left, weight=1)
 
 game_list = tk.Listbox(left, font=("Segoe UI", 11))
 game_list.pack(fill=BOTH, expand=True)
+
+buttons_frame = ttk.Frame(left)
+buttons_frame.pack(fill=tk.X, pady=(10, 0))
+
+favorites_btn = ttk.Button(
+    buttons_frame,
+    text="⭐ В избранное",
+    state=tk.DISABLED,
+)
+favorites_btn.pack(fill=tk.X)
 
 right = ttk.Frame(paned, padding=10)
 banner_label = ttk.Label(right)
@@ -348,6 +378,8 @@ def update_user_state():
         readable_role = "Админ" if role == "admin" else "Пользователь"
         root.title(f"{base_title} - {current_user['username']} ({readable_role})")
         logout_btn.config(state=tk.NORMAL)
+        favorites_btn.config(state=tk.NORMAL)
+        favorites_list_btn.config(state=tk.NORMAL)
         if role == "admin":
             add_btn.config(text="Админ-панель", state=tk.NORMAL)
         else:
@@ -356,6 +388,8 @@ def update_user_state():
         root.title(base_title)
         logout_btn.config(state=tk.DISABLED)
         add_btn.config(text="Требуется вход", state=tk.DISABLED)
+        favorites_btn.config(state=tk.DISABLED)
+        favorites_list_btn.config(state=tk.DISABLED)
 
 def handle_primary_action():
     if not current_user:
@@ -457,7 +491,11 @@ def open_login_window():
         if not data:
             messagebox.showerror("Ошибка", "Неверный логин или пароль.")
             return
-        current_user = {"username": username, "role": data.get("role", "user")}
+        current_user = {
+            "id": data.get("id"),
+            "username": username,
+            "role": data.get("role", "user"),
+        }
         login_win.grab_release()
         login_win.destroy()
         auth_window = None
@@ -527,17 +565,75 @@ def open_propose_game():
         return
 
     def on_submit(data):
-        block = []
-        for label, key in GAME_FIELDS:
-            block.append(f"{label}: {data.get(key, '')}")
-        block.append(f"Предложено пользователем: {current_user['username']}")
-        block.append("")
-        with open(PROPOSALS_FILE, "a", encoding="utf-8") as f:
-            f.write("\n".join(block))
-        messagebox.showinfo("Спасибо", "Предложение отправлено администратору.")
+        create_proposal(current_user["username"], data)
+        messagebox.showinfo("Спасибо", "Предложение сохранено и отправлено администратору.")
         return True
 
     open_game_form("Предложить игру", on_submit=on_submit, submit_text="Отправить")
+
+def add_selected_game_to_favorites():
+    if not current_user:
+        messagebox.showwarning("Требуется вход", "Авторизуйтесь, чтобы использовать избранное.")
+        return
+
+    sel = game_list.curselection()
+    if not sel:
+        messagebox.showwarning("Выбор", "Выберите игру в списке.")
+        return
+
+    idx = sel[0]
+    if idx >= len(filtered_games):
+        messagebox.showerror("Ошибка", "Не удалось определить выбранную игру. Обновите список и попробуйте снова.")
+        return
+
+    game = filtered_games[idx]
+    game_id = game.get("id")
+    if game_id is None:
+        messagebox.showerror("Ошибка", "У этой игры нет ID. Проверьте загрузку из базы.")
+        return
+
+    user_id = current_user.get("id")
+    if user_id is None:
+        messagebox.showerror("Ошибка", "У пользователя нет ID. Проверьте авторизацию.")
+        return
+
+    if is_favorite(user_id, game_id):
+        if messagebox.askyesno("Избранное", "Эта игра уже в избранном. Удалить из избранного?"):
+            remove_favorite(user_id, game_id)
+            messagebox.showinfo("Избранное", "Игра удалена из избранного.")
+    else:
+        add_favorite(user_id, game_id)
+        messagebox.showinfo("Избранное", "Игра добавлена в избранное.")
+
+def open_favorites_window():
+    global current_user
+
+    if not current_user:
+        messagebox.showwarning("Требуется вход", "Авторизуйтесь, чтобы смотреть избранное.")
+        return
+
+    user_id = current_user.get("id")
+    if user_id is None:
+        messagebox.showerror("Ошибка", "У пользователя нет ID. Проверьте авторизацию.")
+        return
+
+    fav_games = fetch_user_favorite_games(user_id)
+
+    win = tk.Toplevel(root)
+    win.title("Мои избранные игры")
+    win.geometry("500x400")
+
+    listbox = tk.Listbox(win, font=("Segoe UI", 11))
+    listbox.pack(fill=tk.BOTH, expand=True)
+
+    if not fav_games:
+        listbox.insert(tk.END, "У вас пока нет избранных игр.")
+    else:
+        for g in fav_games:
+            title = g["title"] or ""
+            year = g["release_year"] or ""
+            listbox.insert(tk.END, f"{title} ({year})")
+
 
 def open_admin_panel():
     if not current_user or current_user.get("role") != "admin":
@@ -618,28 +714,131 @@ def open_admin_panel():
             messagebox.showinfo("Дубликаты", "Повторяющихся записей не найдено.")
 
     def view_proposals():
-        if not os.path.exists(PROPOSALS_FILE):
-            messagebox.showinfo("Предложения", "Файл предложений пока пуст.")
-            return
-        with open(PROPOSALS_FILE, "r", encoding="utf-8") as f:
-            content = f.read().strip()
+        rows = fetch_all_proposals()
+
         win = tk.Toplevel(panel)
         win.title("Предложенные игры")
-        win.geometry("520x420")
+        win.geometry("800x450")
         win.resizable(False, False)
-        txt = tk.Text(win, wrap="word")
-        txt.pack(fill=tk.BOTH, expand=True)
-        if content:
-            txt.insert("1.0", content)
-        else:
-            txt.insert("1.0", "Пока нет предложенных игр.")
-        txt.config(state="disabled")
 
+        left = ttk.Frame(win, padding=5)
+        left.pack(side=tk.LEFT, fill=tk.Y)
+
+        listbox = tk.Listbox(left, font=("Segoe UI", 11), width=35)
+        listbox.pack(fill=tk.BOTH, expand=True)
+
+        right = ttk.Frame(win, padding=5)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        details = tk.Text(right, wrap="word")
+        details.pack(fill=tk.BOTH, expand=True)
+
+        btn_frame = ttk.Frame(right)
+        btn_frame.pack(fill=tk.X, pady=5)
+
+        for row in rows:
+            listbox.insert(tk.END, f"{row['id']}: {row['title']}")
+
+        def show_selected(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            row = rows[idx]
+
+            details.config(state="normal")
+            details.delete("1.0", tk.END)
+
+            rating = row["rating"]
+            rating_str = f"{rating} / 10" if rating is not None else ""
+
+            text_block = []
+            text_block.append(f"Название: {row['title']}")
+            text_block.append(f"Год: {row['release_year'] or ''}")
+            text_block.append(f"Жанр: {row['genre'] or ''}")
+            text_block.append(f"Разработчик: {row['developer'] or ''}")
+            text_block.append(f"Платформы: {row['platforms'] or ''}")
+            text_block.append(f"Рейтинг: {rating_str}")
+            text_block.append("")
+            text_block.append("Описание:")
+            text_block.append(row["description"] or "")
+            text_block.append("")
+            text_block.append(f"Предложено пользователем: {row['username']}")
+            text_block.append(f"Дата: {row['created_at']}")
+            details.insert("1.0", "\n".join(text_block))
+
+            details.config(state="disabled")
+
+        listbox.bind("<<ListboxSelect>>", show_selected)
+
+        if rows:
+            listbox.selection_set(0)
+            show_selected()
+        else:
+            details.config(state="normal")
+            details.insert("1.0", "Пока нет предложенных игр.")
+            details.config(state="disabled")
+
+        def add_to_games():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("Выбор", "Выберите предложение.")
+                return
+
+            idx = sel[0]
+            row = rows[idx]
+
+            game = {
+                "название": row["title"] or "",
+                "год": str(row["release_year"]) if row["release_year"] is not None else "",
+                "жанр": row["genre"] or "",
+                "разработчик": row["developer"] or "",
+                "платформы": row["platforms"] or "",
+                "рейтинг": f"{row['rating']} / 10" if row["rating"] is not None else "",
+                "описание": row["description"] or "",
+            }
+
+            global games
+            games.append(game)
+            save_games_to_file(games)
+            update_list()
+            refresh_list()
+
+            messagebox.showinfo("Добавлено", f"Игра «{game['название']}» добавлена в базу.")
+
+            delete_proposal(row["id"])
+            rows.pop(idx)
+            listbox.delete(idx)
+            details.config(state="normal")
+            details.delete("1.0", tk.END)
+            details.config(state="disabled")
+
+        def delete_proposal_action():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            row = rows[idx]
+            if not messagebox.askyesno("Удаление", f"Удалить предложение «{row['title']}»?"):
+                return
+
+            delete_proposal(row["id"])
+            rows.pop(idx)
+            listbox.delete(idx)
+            details.config(state="normal")
+            details.delete("1.0", tk.END)
+            details.config(state="disabled")
+
+        ttk.Button(btn_frame, text="Добавить в базу игр", command=add_to_games).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Удалить предложение", command=delete_proposal_action).pack(side=tk.LEFT, padx=5)
+
+    
     ttk.Button(btn_frame, text="Добавить", command=add_game_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Редактировать", command=edit_game_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Удалить", command=delete_game_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Удалить дубликаты", command=remove_duplicates_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Предложения", command=view_proposals).pack(fill=tk.X, pady=5)
+
 
     refresh_list()
 
@@ -668,6 +867,8 @@ year_box["values"] = ["Год"] + years
 
 add_btn.config(command=handle_primary_action)
 logout_btn.config(command=logout)
+favorites_btn.config(command=add_selected_game_to_favorites)
+favorites_list_btn.config(command=open_favorites_window)
 
 update_user_state()
 update_list()
