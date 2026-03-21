@@ -1,8 +1,12 @@
 import os
 import json
 import hashlib
+import io
+import re
 import tkinter as tk
 from tkinter import messagebox
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from PIL import Image, ImageDraw, ImageTk
@@ -29,6 +33,214 @@ GAME_FIELDS = [
     ("Рейтинг", "рейтинг"),
     ("Описание", "описание"),
 ]
+BANNER_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp")
+STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/"
+HTTP_HEADERS = {
+    "User-Agent": "Gamepedia/1.0 (+https://steamcommunity.com/)",
+}
+
+
+def normalize_banner_name(title):
+    normalized = (title or "").strip()
+    normalized = re.sub(r'[<>:"/\\\\|?*]', "_", normalized)
+    return normalized.strip(". ") or "banner"
+
+
+def build_banner_path(title):
+    return os.path.join("banners", f"{normalize_banner_name(title)}.jpg")
+
+
+def get_existing_banner_path(title):
+    raw_title = (title or "").strip()
+    if not raw_title:
+        return None
+
+    candidates = []
+    for variant in (raw_title, normalize_banner_name(raw_title)):
+        for ext in BANNER_EXTENSIONS:
+            candidates.append(os.path.join("banners", f"{variant}{ext}"))
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def fetch_steam_image_candidates(query):
+    term = (query or "").strip()
+    if not term:
+        return []
+
+    params = urlencode({"term": term, "l": "russian", "cc": "RU"})
+    request = Request(f"{STEAM_SEARCH_URL}?{params}", headers=HTTP_HEADERS)
+    with urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+
+    items = payload.get("items", [])[:18]
+    results = []
+    seen_urls = set()
+    for item in items:
+        app_id = item.get("id")
+        title = item.get("name") or term
+        candidate_urls = []
+        if app_id:
+            candidate_urls.append(f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg")
+        if item.get("tiny_image"):
+            candidate_urls.append(item["tiny_image"])
+
+        image_url = next((url for url in candidate_urls if url and url not in seen_urls), None)
+        if not image_url:
+            continue
+        seen_urls.add(image_url)
+        results.append({"title": title, "app_id": app_id, "image_url": image_url})
+    return results
+
+
+def load_remote_pil_image(url):
+    request = Request(url, headers=HTTP_HEADERS)
+    with urlopen(request, timeout=20) as response:
+        raw = response.read()
+    image = Image.open(io.BytesIO(raw))
+    image.load()
+    return image
+
+
+def save_banner_for_game(game_title, image_url):
+    if not os.path.exists("banners"):
+        os.makedirs("banners")
+
+    image = load_remote_pil_image(image_url).convert("RGB")
+    target_path = build_banner_path(game_title)
+    image.save(target_path, format="JPEG", quality=92)
+    return target_path
+
+
+def open_banner_picker(game_title, on_saved=None):
+    picker = tk.Toplevel(root)
+    picker.title("Подбор фото игры")
+    picker.geometry("860x520")
+    picker.resizable(False, False)
+    picker.grab_set()
+
+    query_var = tk.StringVar(value=game_title or "")
+    results = []
+    preview_state = {"img": None, "selected_index": None}
+
+    top_frame = ttk.Frame(picker, padding=10)
+    top_frame.pack(fill=tk.X)
+
+    ttk.Label(top_frame, text="Название игры").pack(side=tk.LEFT)
+    query_entry = ttk.Entry(top_frame, textvariable=query_var, width=45)
+    query_entry.pack(side=tk.LEFT, padx=8)
+
+    body = ttk.Frame(picker, padding=(10, 0, 10, 10))
+    body.pack(fill=tk.BOTH, expand=True)
+
+    left = ttk.Frame(body)
+    left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    listbox = tk.Listbox(left, font=("Segoe UI", 10))
+    listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scrollbar = ttk.Scrollbar(left, orient=tk.VERTICAL, command=listbox.yview)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    listbox.config(yscrollcommand=scrollbar.set)
+
+    right = ttk.Frame(body)
+    right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(12, 0))
+
+    preview_label = ttk.Label(right, text="Выберите изображение из списка", anchor="center")
+    preview_label.pack(fill=tk.BOTH, expand=True)
+    source_label = ttk.Label(right, text="", wraplength=330)
+    source_label.pack(fill=tk.X, pady=(8, 0))
+
+    def update_preview(event=None):
+        selection = listbox.curselection()
+        if not selection:
+            preview_state["selected_index"] = None
+            return
+        idx = selection[0]
+        if idx >= len(results):
+            return
+        candidate = results[idx]
+        preview_state["selected_index"] = idx
+        try:
+            preview_image = load_remote_pil_image(candidate["image_url"]).convert("RGB")
+            preview_image.thumbnail((360, 210))
+            preview_photo = ImageTk.PhotoImage(preview_image)
+            preview_label.config(image=preview_photo, text="")
+            preview_label.image = preview_photo
+            preview_state["img"] = preview_photo
+            source_label.config(text=f"{candidate['title']} (Steam AppID: {candidate.get('app_id') or 'n/a'})")
+        except Exception as ex:
+            preview_label.config(image="", text=f"Не удалось загрузить превью.\n{ex}")
+            preview_label.image = None
+            preview_state["img"] = None
+
+    def search_action():
+        term = query_var.get().strip()
+        if not term:
+            messagebox.showwarning("Поиск", "Введите название игры.")
+            return
+
+        listbox.delete(0, tk.END)
+        preview_label.config(image="", text="Ищем изображения...")
+        preview_label.image = None
+        source_label.config(text="")
+        picker.update_idletasks()
+
+        try:
+            found = fetch_steam_image_candidates(term)
+        except Exception as ex:
+            messagebox.showerror("Ошибка", f"Не удалось выполнить поиск изображений.\n{ex}")
+            return
+
+        results.clear()
+        results.extend(found)
+        if not results:
+            preview_label.config(image="", text="Изображения не найдены.")
+            return
+
+        for candidate in results:
+            app_id = candidate.get("app_id")
+            suffix = f" [AppID: {app_id}]" if app_id else ""
+            listbox.insert(tk.END, f"{candidate['title']}{suffix}")
+
+        listbox.selection_clear(0, tk.END)
+        listbox.selection_set(0)
+        update_preview()
+
+    def save_selected():
+        idx = preview_state.get("selected_index")
+        if idx is None or idx >= len(results):
+            messagebox.showwarning("Выбор", "Сначала выберите изображение в списке.")
+            return
+
+        candidate = results[idx]
+        try:
+            saved_path = save_banner_for_game(game_title or query_var.get(), candidate["image_url"])
+        except Exception as ex:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить изображение.\n{ex}")
+            return
+
+        messagebox.showinfo("Сохранено", f"Изображение сохранено:\n{saved_path}")
+        if on_saved:
+            on_saved(saved_path)
+        picker.grab_release()
+        picker.destroy()
+
+    controls = ttk.Frame(picker, padding=(10, 0, 10, 10))
+    controls.pack(fill=tk.X)
+    ttk.Button(controls, text="Найти", command=search_action).pack(side=tk.LEFT)
+    ttk.Button(controls, text="Сохранить выбранное", command=save_selected).pack(side=tk.RIGHT)
+
+    listbox.bind("<<ListboxSelect>>", update_preview)
+    query_entry.bind("<Return>", lambda _event: search_action())
+    query_entry.focus_set()
+    search_action()
 
 def load_games(_filename=None):
     rows = fetch_all_games()
@@ -76,7 +288,7 @@ def save_games_to_file(current_games):
                 rating = None
 
         description = g.get("описание", "").strip() or None
-        image_path = f"banners/{title}.jpg" if title else None
+        image_path = get_existing_banner_path(title) or (build_banner_path(title) if title else None)
 
         cursor.execute(
             insert_sql,
@@ -363,8 +575,8 @@ def show_info(_):
     info.insert("end", txt)
     info.config(state="disabled")
 
-    banner_path = f"banners/{g.get('название')}.jpg"
-    if os.path.exists(banner_path):
+    banner_path = get_existing_banner_path(g.get("название"))
+    if banner_path and os.path.exists(banner_path):
         img = Image.open(banner_path).resize((350, 200))
         banner = ImageTk.PhotoImage(img)
         banner_label.config(image=banner)
@@ -713,6 +925,24 @@ def open_admin_panel():
         else:
             messagebox.showinfo("Дубликаты", "Повторяющихся записей не найдено.")
 
+    def pick_banner_action():
+        idx = get_selected_index()
+        if idx is None:
+            return
+        title = (games[idx].get("название") or "").strip()
+        if not title:
+            messagebox.showwarning("Выбор", "У выбранной игры нет названия.")
+            return
+
+        def on_banner_saved(_saved_path):
+            update_list()
+            refresh_list()
+            selected = game_list.curselection()
+            if selected:
+                show_info(None)
+
+        open_banner_picker(title, on_saved=on_banner_saved)
+
     def view_proposals():
         rows = fetch_all_proposals()
 
@@ -836,6 +1066,7 @@ def open_admin_panel():
     ttk.Button(btn_frame, text="Добавить", command=add_game_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Редактировать", command=edit_game_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Удалить", command=delete_game_action).pack(fill=tk.X, pady=5)
+    ttk.Button(btn_frame, text="Подобрать фото", command=pick_banner_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Удалить дубликаты", command=remove_duplicates_action).pack(fill=tk.X, pady=5)
     ttk.Button(btn_frame, text="Предложения", command=view_proposals).pack(fill=tk.X, pady=5)
 
