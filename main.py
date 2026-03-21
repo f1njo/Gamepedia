@@ -3,6 +3,7 @@ import json
 import hashlib
 import io
 import re
+import sys
 import tkinter as tk
 from tkinter import messagebox
 from urllib.parse import urlencode
@@ -22,8 +23,24 @@ from db import (
     fetch_user_favorite_games,
 )
 
-USERS_FILE = "users.json"
-PROPOSALS_FILE = "proposals.txt"
+if getattr(sys, "frozen", False):
+    APP_DIR = os.path.dirname(sys.executable)
+    BUNDLE_DIR = getattr(sys, "_MEIPASS", APP_DIR)
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))
+    BUNDLE_DIR = APP_DIR
+
+
+def app_path(*parts):
+    return os.path.join(APP_DIR, *parts)
+
+
+def bundle_path(*parts):
+    return os.path.join(BUNDLE_DIR, *parts)
+
+
+USERS_FILE = app_path("users.json")
+PROPOSALS_FILE = app_path("proposals.txt")
 GAME_FIELDS = [
     ("Название", "название"),
     ("Год", "год"),
@@ -47,7 +64,7 @@ def normalize_banner_name(title):
 
 
 def build_banner_path(title):
-    return os.path.join("banners", f"{normalize_banner_name(title)}.jpg")
+    return app_path("banners", f"{normalize_banner_name(title)}.jpg")
 
 
 def get_existing_banner_path(title):
@@ -58,7 +75,8 @@ def get_existing_banner_path(title):
     candidates = []
     for variant in (raw_title, normalize_banner_name(raw_title)):
         for ext in BANNER_EXTENSIONS:
-            candidates.append(os.path.join("banners", f"{variant}{ext}"))
+            candidates.append(app_path("banners", f"{variant}{ext}"))
+            candidates.append(bundle_path("banners", f"{variant}{ext}"))
 
     seen = set()
     for candidate in candidates:
@@ -110,8 +128,9 @@ def load_remote_pil_image(url):
 
 
 def save_banner_for_game(game_title, image_url):
-    if not os.path.exists("banners"):
-        os.makedirs("banners")
+    banner_dir = app_path("banners")
+    if not os.path.exists(banner_dir):
+        os.makedirs(banner_dir)
 
     image = load_remote_pil_image(image_url).convert("RGB")
     target_path = build_banner_path(game_title)
@@ -119,8 +138,8 @@ def save_banner_for_game(game_title, image_url):
     return target_path
 
 
-def open_banner_picker(game_title, on_saved=None):
-    picker = tk.Toplevel(root)
+def open_banner_picker(game_title, on_saved=None, parent=None):
+    picker = tk.Toplevel(parent or root)
     picker.title("Подбор фото игры")
     picker.geometry("860x520")
     picker.resizable(False, False)
@@ -373,12 +392,13 @@ def open_drawing_pad():
     canvas.bind("<ButtonRelease-1>", release)
 
     def save():
-        if not os.path.exists("notes"):
-            os.mkdir("notes")
+        notes_dir = app_path("notes")
+        if not os.path.exists(notes_dir):
+            os.mkdir(notes_dir)
         i = 1
-        while os.path.exists(f"notes/note_{i}.png"):
+        while os.path.exists(app_path("notes", f"note_{i}.png")):
             i += 1
-        img.save(f"notes/note_{i}.png")
+        img.save(app_path("notes", f"note_{i}.png"))
         messagebox.showinfo("Сохранено", f"Заметка сохранена: note_{i}.png")
         win.destroy()
 
@@ -394,7 +414,10 @@ current_theme = "darkly"
 base_title = "Gamepedia"
 
 root = ttk.Window(themename=current_theme)
-root.iconbitmap("icon.ico")
+try:
+    root.iconbitmap(bundle_path("icon.ico"))
+except tk.TclError:
+    pass
 root.title(base_title)
 root.geometry("1280x720")
 root.resizable(False, False)
@@ -941,7 +964,7 @@ def open_admin_panel():
             if selected:
                 show_info(None)
 
-        open_banner_picker(title, on_saved=on_banner_saved)
+        open_banner_picker(title, on_saved=on_banner_saved, parent=panel)
 
     def view_proposals():
         rows = fetch_all_proposals()
